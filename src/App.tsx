@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
-import { AudioSystem, getTerrainHeight, createTerrain, createWorldProps } from './game/engine';
+import { AudioSystem, getTerrainHeight, createTerrain, createWorldProps, checkCollision, CollisionBox } from './game/engine';
 import { NPC, createNPC, updateNPC, Weapon, createWeaponViewmodel, LootItem, createLoot, ItemType } from './game/entities';
 
 interface InventoryItem {
@@ -47,7 +47,6 @@ export default function App() {
     prompt: '',
   });
 
-  // Game data refs (mutable game state)
   const gameDataRef = useRef<{
     health: number;
     radiation: number;
@@ -73,6 +72,7 @@ export default function App() {
     audio: AudioSystem | null;
     scene: THREE.Scene | null;
     anomalies: any[];
+    collisionBoxes: CollisionBox[];
   }>({
     health: 100,
     radiation: 0,
@@ -98,6 +98,7 @@ export default function App() {
     audio: null,
     scene: null,
     anomalies: [],
+    collisionBoxes: [],
   });
 
   const startGame = useCallback(() => {
@@ -142,8 +143,9 @@ export default function App() {
     // WORLD
     // ============================================================
     createTerrain(scene);
-    const { anomalies } = createWorldProps(scene);
+    const { anomalies, collisionBoxes } = createWorldProps(scene);
     gd.anomalies = anomalies;
+    gd.collisionBoxes = collisionBoxes;
 
     const muzzleFlash = new THREE.PointLight(0xffaa44, 0, 8);
     scene.add(muzzleFlash);
@@ -217,10 +219,12 @@ export default function App() {
     gd.lootItems = lootItems;
 
     // ============================================================
-    // INPUT
+    // INPUT - FIXED MOUSE HANDLING
     // ============================================================
     const keys: Record<string, boolean> = {};
     let isLocked = false;
+    let mouseDownThisFrame = false;
+    let mouseUpThisFrame = false;
 
     const onKeyDown = (e: KeyboardEvent) => {
       keys[e.code] = true;
@@ -233,16 +237,31 @@ export default function App() {
       if (e.code === 'KeyE' || e.code === 'KeyF') tryPickup();
     };
     const onKeyUp = (e: KeyboardEvent) => { keys[e.code] = false; };
-    const onMouseDown = (e: MouseEvent) => { if (e.button === 0) gd.isMouseDown = true; };
-    const onMouseUp = (e: MouseEvent) => { if (e.button === 0) gd.isMouseDown = false; };
+    
+    // FIXED: Proper mouse event handling
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button === 0 && isLocked && !showInventoryRef.current) {
+        gd.isMouseDown = true;
+        mouseDownThisFrame = true;
+      }
+    };
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button === 0) {
+        gd.isMouseDown = false;
+        mouseUpThisFrame = true;
+      }
+    };
     const onMouseMove = (e: MouseEvent) => {
       if (!isLocked || showInventoryRef.current) return;
       gd.yaw -= e.movementX * 0.002;
       gd.pitch -= e.movementY * 0.002;
       gd.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, gd.pitch));
     };
-    const onPointerLockChange = () => { isLocked = document.pointerLockElement === canvas; };
+    const onPointerLockChange = () => {
+      isLocked = document.pointerLockElement === canvas;
+    };
 
+    // Use document for mouse events to ensure they work
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
     document.addEventListener('mousedown', onMouseDown);
@@ -436,39 +455,31 @@ export default function App() {
       let gpFire = false, gpSprint = false;
       for (const gp of gamepads) {
         if (!gp) continue;
-        // Left stick = move
         if (Math.abs(gp.axes[0]) > 0.15) gpMoveX = gp.axes[0];
         if (Math.abs(gp.axes[1]) > 0.15) gpMoveY = gp.axes[1];
-        // Right stick = look
         if (Math.abs(gp.axes[2]) > 0.15) gpLookX = gp.axes[2];
         if (Math.abs(gp.axes[3]) > 0.15) gpLookY = gp.axes[3];
-        // Right trigger = fire
         if (gp.buttons[7] && gp.buttons[7].value > 0.5) gpFire = true;
-        // Left trigger = sprint
         if (gp.buttons[6] && gp.buttons[6].value > 0.5) gpSprint = true;
-        // A button = crouch toggle
         if (gp.buttons[0] && gp.buttons[0].pressed) {
           if (!gpCrouchLast) { gd.isCrouching = !gd.isCrouching; }
           gpCrouchLast = true;
         } else { gpCrouchLast = false; }
-        // B button = reload
         if (gp.buttons[1] && gp.buttons[1].pressed && !gpReloadLast) { startReload(); gpReloadLast = true; }
         if (!(gp.buttons[1] && gp.buttons[1].pressed)) gpReloadLast = false;
-        // X/Y = weapon switch
         if (gp.buttons[2] && gp.buttons[2].pressed && !gpWepLast) { gd.currentWeaponIdx = 0; gpWepLast = true; }
         if (gp.buttons[3] && gp.buttons[3].pressed && !gpWepLast) { gd.currentWeaponIdx = 1; gpWepLast = true; }
         if (!(gp.buttons[2]?.pressed || gp.buttons[3]?.pressed)) gpWepLast = false;
-        break; // Use first gamepad
+        break;
       }
 
-      // Gamepad look
       if (gpLookX !== 0 || gpLookY !== 0) {
         gd.yaw -= gpLookX * 2.5 * dt;
         gd.pitch -= gpLookY * 2.0 * dt;
         gd.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, gd.pitch));
       }
 
-      // ---- MOVEMENT ----
+      // ---- MOVEMENT WITH COLLISION ----
       gd.isSprinting = keys['ShiftLeft'] || keys['ShiftRight'] || gpSprint;
       const targetHeight = gd.isCrouching ? 0.9 : 1.7;
       gd.cameraHeight += (targetHeight - gd.cameraHeight) * dt * 8;
@@ -481,7 +492,6 @@ export default function App() {
       if (keys['KeyS']) moveDir.sub(forward);
       if (keys['KeyA']) moveDir.sub(right);
       if (keys['KeyD']) moveDir.add(right);
-      // Gamepad movement
       if (gpMoveX !== 0 || gpMoveY !== 0) {
         moveDir.add(right.clone().multiplyScalar(gpMoveX));
         moveDir.add(forward.clone().multiplyScalar(-gpMoveY));
@@ -489,8 +499,15 @@ export default function App() {
 
       if (moveDir.length() > 0) {
         moveDir.normalize();
-        gd.playerPos.x += moveDir.x * moveSpeed * dt;
-        gd.playerPos.z += moveDir.z * moveSpeed * dt;
+        const newPos = gd.playerPos.clone();
+        newPos.x += moveDir.x * moveSpeed * dt;
+        newPos.z += moveDir.z * moveSpeed * dt;
+        
+        // Apply collision detection
+        const collidedPos = checkCollision(newPos, 0.5, gd.collisionBoxes);
+        gd.playerPos.x = collidedPos.x;
+        gd.playerPos.z = collidedPos.z;
+        
         gd.weaponBob += dt * (gd.isSprinting ? 12 : 8);
       }
 
@@ -505,14 +522,16 @@ export default function App() {
       camera.rotation.y = gd.yaw;
       camera.rotation.x = gd.pitch;
 
-      // ---- FIRING ----
+      // ---- FIRING - FIXED ----
       const w = weapons[gd.currentWeaponIdx];
       const firing = (gd.isMouseDown && isLocked) || gpFire;
+      
       if (firing) {
         if (w.auto) {
           fireWeapon();
         } else {
-          if (!semiAutoFired) {
+          // Semi-auto: only fire on mouse down, not while held
+          if (mouseDownThisFrame && !semiAutoFired) {
             fireWeapon();
             semiAutoFired = true;
           }
@@ -520,6 +539,10 @@ export default function App() {
       } else {
         semiAutoFired = false;
       }
+      
+      // Reset frame flags
+      mouseDownThisFrame = false;
+      mouseUpThisFrame = false;
 
       if (w.isReloading) {
         const elapsed = performance.now() / 1000 - w.reloadStartTime;
@@ -557,7 +580,6 @@ export default function App() {
       }
       if (gd.radiation > 50) gd.health = Math.max(0, gd.health - dt * 3);
 
-      // Artifact effects
       const hasArtifact = gd.artifactSlots[0] !== null || gd.artifactSlots[1] !== null;
       if (hasArtifact) {
         gd.health = Math.min(100, gd.health + dt * 2);
@@ -619,7 +641,7 @@ export default function App() {
       renderer.clearDepth();
       renderer.render(weaponScene, weaponCamera);
 
-      // ---- UPDATE HUD (throttled) ----
+      // ---- UPDATE HUD ----
       hudUpdateTimer += dt;
       if (hudUpdateTimer > 0.1) {
         hudUpdateTimer = 0;
@@ -656,9 +678,6 @@ export default function App() {
     };
   }, [started]);
 
-  // ============================================================
-  // USE ITEM
-  // ============================================================
   const useItem = useCallback((item: InventoryItem) => {
     const gd = gameDataRef.current;
     const idx = gd.inventory.findIndex(i => i.gridX === item.gridX && i.gridY === item.gridY);
@@ -691,7 +710,6 @@ export default function App() {
         break;
       }
     }
-    // Force HUD update
     setHud(prev => ({
       ...prev,
       health: gd.health,
@@ -702,9 +720,6 @@ export default function App() {
     }));
   }, []);
 
-  // ============================================================
-  // START SCREEN
-  // ============================================================
   if (!started) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center bg-black font-mono select-none">
@@ -734,9 +749,6 @@ export default function App() {
     );
   }
 
-  // ============================================================
-  // GAME HUD
-  // ============================================================
   return (
     <div className="w-full h-full relative overflow-hidden bg-black select-none">
       <canvas
@@ -745,10 +757,8 @@ export default function App() {
         style={{ imageRendering: 'pixelated' }}
       />
 
-      {/* HUD */}
       {!hud.isDead && !showInventory && (
         <>
-          {/* Crosshair */}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="relative w-8 h-8">
               <div className="absolute top-0 left-1/2 w-[2px] h-2.5 bg-green-400/80 -translate-x-1/2"></div>
@@ -759,7 +769,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Health & Radiation */}
           <div className="absolute bottom-4 left-4 pointer-events-none">
             <div className="flex items-center gap-2 mb-1.5">
               <span className="text-red-500 text-[10px] font-mono w-7 font-bold">HP</span>
@@ -783,7 +792,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Weapon Info */}
           <div className="absolute bottom-4 right-4 text-right pointer-events-none">
             <div className="text-green-500 text-[10px] font-mono tracking-wider">{hud.weaponName}</div>
             <div className="text-green-300 text-xl font-mono font-bold leading-tight">
@@ -792,7 +800,6 @@ export default function App() {
             <div className="text-green-600 text-[10px] font-mono">Reserve: {hud.reserveAmmo}</div>
           </div>
 
-          {/* Event Log */}
           <div className="absolute top-4 left-4 pointer-events-none max-w-[250px]">
             {hud.log.slice(-4).map((msg, i) => (
               <div key={i} className="text-yellow-200/70 text-[10px] font-mono mb-0.5 leading-tight">
@@ -801,7 +808,6 @@ export default function App() {
             ))}
           </div>
 
-          {/* Weapon Slots */}
           <div className="absolute top-4 right-4 pointer-events-none">
             <div className={`text-[10px] font-mono px-2 py-0.5 mb-0.5 ${hud.currentWeapon === 0 ? 'text-green-300 bg-green-900/60 border border-green-700' : 'text-gray-600'}`}>
               [1] PMm Makarov
@@ -811,7 +817,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Pickup Prompt */}
           {hud.prompt && (
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 translate-y-10 pointer-events-none">
               <div className="text-yellow-300 text-xs font-mono bg-black/70 px-3 py-1.5 border border-yellow-800/50">
@@ -822,7 +827,6 @@ export default function App() {
         </>
       )}
 
-      {/* Death Screen */}
       {hud.isDead && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-950/80 pointer-events-none">
           <h2 className="text-5xl text-red-300 font-mono mb-4" style={{ textShadow: '0 0 20px #ff0000' }}>YOU DIED</h2>
@@ -831,7 +835,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Inventory */}
       {showInventory && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/90 z-50">
           <div className="w-[640px] max-w-[95vw] bg-gray-950 border-2 border-green-800 p-5 font-mono">
@@ -840,7 +843,6 @@ export default function App() {
             </h2>
 
             <div className="flex gap-5 flex-wrap">
-              {/* Equipment */}
               <div className="flex-1 min-w-[220px]">
                 <h3 className="text-green-600 text-xs mb-2 tracking-wider">▸ EQUIPMENT</h3>
                 <div className="space-y-2">
@@ -875,12 +877,10 @@ export default function App() {
                   <div className="text-gray-500 text-[10px] space-y-0.5">
                     <div>Health: <span className="text-red-400">{Math.round(hud.health)}%</span></div>
                     <div>Radiation: <span className="text-yellow-400">{Math.round(hud.radiation)}%</span></div>
-                    <div>9x18mm: <span className="text-yellow-300">{hud.reserveAmmo}</span> | 5.45mm: <span className="text-yellow-300">{hud.reserveAmmo}</span></div>
                   </div>
                 </div>
               </div>
 
-              {/* Grid */}
               <div className="flex-1 min-w-[220px]">
                 <h3 className="text-green-600 text-xs mb-2 tracking-wider">▸ BACKPACK (6×4)</h3>
                 <div className="grid grid-cols-6 gap-1">

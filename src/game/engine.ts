@@ -263,15 +263,12 @@ export function createTerrain(scene: THREE.Scene): THREE.Mesh {
 
     let r: number, g: number, b: number;
     if (distToRoad < 4) {
-      // Road - dark asphalt/dirt
       const n = TextureGen.noise(x * 0.5, z * 0.5, 20) * 15;
       r = (70 + n) / 255; g = (65 + n) / 255; b = (55 + n) / 255;
     } else if (h > 3) {
-      // Hills - dark olive
       const n = TextureGen.noise(x * 0.3, z * 0.3, 21) * 20;
       r = (45 + n) / 255; g = (55 + n) / 255; b = (30 + n) / 255;
     } else {
-      // Grass/mud blend
       const n = TextureGen.noise(x * 0.2, z * 0.2, 22) * 25;
       const mudFactor = TextureGen.noise(x * 0.1, z * 0.1, 23);
       r = (55 + n * mudFactor + 20 * (1 - mudFactor)) / 255;
@@ -298,12 +295,45 @@ export function createTerrain(scene: THREE.Scene): THREE.Mesh {
 }
 
 // ============================================================
+// COLLISION SYSTEM
+// ============================================================
+export interface CollisionBox {
+  min: THREE.Vector3;
+  max: THREE.Vector3;
+}
+
+export function checkCollision(pos: THREE.Vector3, radius: number, boxes: CollisionBox[]): THREE.Vector3 {
+  const newPos = pos.clone();
+  
+  for (const box of boxes) {
+    // Check if player sphere intersects with AABB
+    const closestPoint = new THREE.Vector3(
+      Math.max(box.min.x, Math.min(newPos.x, box.max.x)),
+      Math.max(box.min.y, Math.min(newPos.y, box.max.y)),
+      Math.max(box.min.z, Math.min(newPos.z, box.max.z))
+    );
+    
+    const distance = newPos.distanceTo(closestPoint);
+    
+    if (distance < radius) {
+      // Push player out of collision
+      const pushDir = newPos.clone().sub(closestPoint).normalize();
+      const pushDistance = radius - distance;
+      newPos.add(pushDir.multiplyScalar(pushDistance));
+    }
+  }
+  
+  return newPos;
+}
+
+// ============================================================
 // WORLD PROPS - Houses, Vehicles, Anomalies
 // ============================================================
 export interface WorldProp {
   mesh: THREE.Group;
   position: THREE.Vector3;
   type: string;
+  collisionBox: CollisionBox;
 }
 
 export interface AnomalyZone {
@@ -312,9 +342,10 @@ export interface AnomalyZone {
   particles: THREE.Points;
 }
 
-export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anomalies: AnomalyZone[] } {
+export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anomalies: AnomalyZone[], collisionBoxes: CollisionBox[] } {
   const props: WorldProp[] = [];
   const anomalies: AnomalyZone[] = [];
+  const collisionBoxes: CollisionBox[] = [];
 
   // Village Houses
   const housePositions = [
@@ -330,7 +361,16 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     pos.y = getTerrainHeight(pos.x, pos.z);
     house.position.copy(pos);
     scene.add(house);
-    props.push({ mesh: house, position: pos.clone(), type: 'house' });
+    
+    const w = 6 + idx;
+    const d = 5 + (idx % 2) * 2;
+    const collisionBox: CollisionBox = {
+      min: new THREE.Vector3(pos.x - w/2 - 0.5, pos.y, pos.z - d/2 - 0.5),
+      max: new THREE.Vector3(pos.x + w/2 + 0.5, pos.y + 4, pos.z + d/2 + 0.5)
+    };
+    collisionBoxes.push(collisionBox);
+    
+    props.push({ mesh: house, position: pos.clone(), type: 'house', collisionBox });
   });
 
   // Vehicles
@@ -347,7 +387,17 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     vehicle.position.copy(v.pos);
     vehicle.rotation.y = Math.random() * Math.PI * 2;
     scene.add(vehicle);
-    props.push({ mesh: vehicle, position: v.pos.clone(), type: v.type });
+    
+    const collisionBox: CollisionBox = v.type === 'uaz' ? {
+      min: new THREE.Vector3(v.pos.x - 1.5, v.pos.y, v.pos.z - 2.5),
+      max: new THREE.Vector3(v.pos.x + 1.5, v.pos.y + 2, v.pos.z + 2.5)
+    } : {
+      min: new THREE.Vector3(v.pos.x - 1.8, v.pos.y, v.pos.z - 3.5),
+      max: new THREE.Vector3(v.pos.x + 1.8, v.pos.y + 2.5, v.pos.z + 3.5)
+    };
+    collisionBoxes.push(collisionBox);
+    
+    props.push({ mesh: vehicle, position: v.pos.clone(), type: v.type, collisionBox });
   });
 
   // Anomaly Zones
@@ -374,9 +424,33 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     const tree = createDeadTree();
     tree.position.set(x, getTerrainHeight(x, z), z);
     scene.add(tree);
+    
+    // Tree collision (thin cylinder)
+    collisionBoxes.push({
+      min: new THREE.Vector3(x - 0.3, getTerrainHeight(x, z), z - 0.3),
+      max: new THREE.Vector3(x + 0.3, getTerrainHeight(x, z) + 4, z + 0.3)
+    });
   }
 
-  return { props, anomalies };
+  // Rocks
+  for (let i = 0; i < 30; i++) {
+    const x = (Math.random() - 0.5) * 250;
+    const z = (Math.random() - 0.5) * 250;
+    const roadX = Math.sin(z * 0.02) * 15;
+    if (Math.abs(x - roadX) < 6) continue;
+    const rock = createRock();
+    const y = getTerrainHeight(x, z);
+    rock.position.set(x, y, z);
+    scene.add(rock);
+    
+    const size = 0.5 + Math.random() * 1.5;
+    collisionBoxes.push({
+      min: new THREE.Vector3(x - size, y, z - size),
+      max: new THREE.Vector3(x + size, y + size, z + size)
+    });
+  }
+
+  return { props, anomalies, collisionBoxes };
 }
 
 function createHouse(variant: number): THREE.Group {
@@ -419,13 +493,28 @@ function createHouse(variant: number): THREE.Group {
   floor.position.set(0, 0.1, 0);
   group.add(floor);
 
-  // Roof
+  // Roof - more detailed
   const roofMat = new THREE.MeshLambertMaterial({ map: TextureGen.rust(), flatShading: true });
   const roofGeo = new THREE.BoxGeometry(w + 1, 0.2, d + 1);
   const roof = new THREE.Mesh(roofGeo, roofMat);
   roof.position.set(0, h + 0.5, 0);
   roof.rotation.z = 0.15;
   group.add(roof);
+  
+  // Roof ridge
+  const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, d + 1), roofMat);
+  ridge.position.set(0, h + 0.8, 0);
+  group.add(ridge);
+
+  // Windows
+  const windowMat = new THREE.MeshLambertMaterial({ color: 0x88aacc, flatShading: true });
+  const windowFrame = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.1), windowMat);
+  windowFrame.position.set(-w / 4, h / 2 + 0.5, d / 2 + 0.15);
+  group.add(windowFrame);
+  
+  const windowFrame2 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.1), windowMat);
+  windowFrame2.position.set(w / 4, h / 2 + 0.5, d / 2 + 0.15);
+  group.add(windowFrame2);
 
   return group;
 }
@@ -434,31 +523,84 @@ function createUAZ(): THREE.Group {
   const group = new THREE.Group();
   const bodyMat = new THREE.MeshLambertMaterial({ color: 0x4a5a3a, flatShading: true });
   const rustMat = new THREE.MeshLambertMaterial({ map: TextureGen.rust(), flatShading: true });
+  const glassMat = new THREE.MeshLambertMaterial({ color: 0x88aacc, transparent: true, opacity: 0.5, flatShading: true });
 
-  // Body
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2, 1.2, 4), bodyMat);
-  body.position.y = 1;
-  group.add(body);
+  // Body - more detailed with multiple parts
+  const bodyMain = new THREE.Mesh(new THREE.BoxGeometry(2, 1, 4), bodyMat);
+  bodyMain.position.y = 1;
+  group.add(bodyMain);
+
+  // Hood
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.3, 1.5), bodyMat);
+  hood.position.set(0, 1.3, -1.2);
+  group.add(hood);
 
   // Cabin
   const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.8, 2), bodyMat);
   cabin.position.set(0, 1.8, -0.5);
   group.add(cabin);
 
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 8);
+  // Windshield
+  const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 0.05), glassMat);
+  windshield.position.set(0, 1.9, 0.5);
+  group.add(windshield);
+
+  // Rear section
+  const rear = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.6, 1), bodyMat);
+  rear.position.set(0, 1.6, 1.5);
+  group.add(rear);
+
+  // Fenders
+  const fenderGeo = new THREE.BoxGeometry(0.3, 0.4, 1);
+  const fenderFL = new THREE.Mesh(fenderGeo, bodyMat);
+  fenderFL.position.set(-0.9, 0.8, 1.2);
+  group.add(fenderFL);
+  const fenderFR = new THREE.Mesh(fenderGeo, bodyMat);
+  fenderFR.position.set(0.9, 0.8, 1.2);
+  group.add(fenderFR);
+  const fenderBL = new THREE.Mesh(fenderGeo, bodyMat);
+  fenderBL.position.set(-0.9, 0.8, -1.2);
+  group.add(fenderBL);
+  const fenderBR = new THREE.Mesh(fenderGeo, bodyMat);
+  fenderBR.position.set(0.9, 0.8, -1.2);
+  group.add(fenderBR);
+
+  // Wheels - more detailed
+  const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 12);
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222, flatShading: true });
+  const hubGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.32, 8);
+  const hubMat = new THREE.MeshLambertMaterial({ color: 0x666666, flatShading: true });
+  
   [[-0.9, 0.4, 1.2], [0.9, 0.4, 1.2], [-0.9, 0.4, -1.2], [0.9, 0.4, -1.2]].forEach(([x, y, z]) => {
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.position.set(x, y, z);
     wheel.rotation.z = Math.PI / 2;
     group.add(wheel);
+    
+    const hub = new THREE.Mesh(hubGeo, hubMat);
+    hub.position.set(x, y, z);
+    hub.rotation.z = Math.PI / 2;
+    group.add(hub);
   });
+
+  // Headlights
+  const lightGeo = new THREE.SphereGeometry(0.15, 8, 8);
+  const lightMat = new THREE.MeshLambertMaterial({ color: 0xffffcc, emissive: 0x444400 });
+  const lightL = new THREE.Mesh(lightGeo, lightMat);
+  lightL.position.set(-0.6, 1.2, -2);
+  group.add(lightL);
+  const lightR = new THREE.Mesh(lightGeo, lightMat);
+  lightR.position.set(0.6, 1.2, -2);
+  group.add(lightR);
 
   // Rust patches
   const rustPatch = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.1), rustMat);
   rustPatch.position.set(0.8, 1.2, 2.01);
   group.add(rustPatch);
+  
+  const rustPatch2 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 0.1), rustMat);
+  rustPatch2.position.set(-0.7, 1.0, 1.5);
+  group.add(rustPatch2);
 
   return group;
 }
@@ -467,37 +609,81 @@ function createZIL(): THREE.Group {
   const group = new THREE.Group();
   const cabMat = new THREE.MeshLambertMaterial({ color: 0x3a5a8a, flatShading: true });
   const woodMat = new THREE.MeshLambertMaterial({ map: TextureGen.wood(), flatShading: true });
+  const glassMat = new THREE.MeshLambertMaterial({ color: 0x88aacc, transparent: true, opacity: 0.5, flatShading: true });
 
-  // Cab
-  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2, 2.5), cabMat);
-  cab.position.set(0, 1.5, -2);
-  group.add(cab);
+  // Cab - more detailed
+  const cabMain = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.5, 2), cabMat);
+  cabMain.position.set(0, 1.5, -2);
+  group.add(cabMain);
+
+  // Cab roof
+  const cabRoof = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.3, 1.8), cabMat);
+  cabRoof.position.set(0, 2.4, -2);
+  group.add(cabRoof);
+
+  // Windshield
+  const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 0.05), glassMat);
+  windshield.position.set(0, 1.8, -1);
+  group.add(windshield);
+
+  // Hood
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.8, 1), cabMat);
+  hood.position.set(0, 1.2, -3);
+  group.add(hood);
+
+  // Grille
+  const grilleMat = new THREE.MeshLambertMaterial({ color: 0x444444, flatShading: true });
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(2, 0.6, 0.1), grilleMat);
+  grille.position.set(0, 1.2, -3.5);
+  group.add(grille);
 
   // Cargo bed
   const bed = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.3, 4), woodMat);
   bed.position.set(0, 0.8, 1.5);
   group.add(bed);
 
-  // Cargo sides
-  const sideL = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1, 4), woodMat);
-  sideL.position.set(-1.2, 1.3, 1.5);
-  group.add(sideL);
-  const sideR = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1, 4), woodMat);
-  sideR.position.set(1.2, 1.3, 1.5);
-  group.add(sideR);
+  // Cargo sides - more detailed with planks
+  for (let i = 0; i < 4; i++) {
+    const plank = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.9), woodMat);
+    plank.position.set(-1.2, 1.2, -0.5 + i * 1);
+    group.add(plank);
+    
+    const plankR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.9), woodMat);
+    plankR.position.set(1.2, 1.2, -0.5 + i * 1);
+    group.add(plankR);
+  }
+  
   const sideB = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1, 0.15), woodMat);
   sideB.position.set(0, 1.3, 3.5);
   group.add(sideB);
 
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.35, 8);
+  // Wheels - more detailed
+  const wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.35, 12);
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222, flatShading: true });
+  const hubGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.37, 8);
+  const hubMat = new THREE.MeshLambertMaterial({ color: 0x666666, flatShading: true });
+  
   [[-1.1, 0.5, -2], [1.1, 0.5, -2], [-1.1, 0.5, 1], [1.1, 0.5, 1], [-1.1, 0.5, 2.5], [1.1, 0.5, 2.5]].forEach(([x, y, z]) => {
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.position.set(x, y, z);
     wheel.rotation.z = Math.PI / 2;
     group.add(wheel);
+    
+    const hub = new THREE.Mesh(hubGeo, hubMat);
+    hub.position.set(x, y, z);
+    hub.rotation.z = Math.PI / 2;
+    group.add(hub);
   });
+
+  // Headlights
+  const lightGeo = new THREE.SphereGeometry(0.2, 8, 8);
+  const lightMat = new THREE.MeshLambertMaterial({ color: 0xffffcc, emissive: 0x444400 });
+  const lightL = new THREE.Mesh(lightGeo, lightMat);
+  lightL.position.set(-0.8, 1.2, -3.5);
+  group.add(lightL);
+  const lightR = new THREE.Mesh(lightGeo, lightMat);
+  lightR.position.set(0.8, 1.2, -3.5);
+  group.add(lightR);
 
   return group;
 }
@@ -505,18 +691,84 @@ function createZIL(): THREE.Group {
 function createDeadTree(): THREE.Group {
   const group = new THREE.Group();
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x3a2a1a, flatShading: true });
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.25, 4, 5), trunkMat);
+  
+  // Trunk with more segments
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.3, 4, 8), trunkMat);
   trunk.position.y = 2;
   group.add(trunk);
 
-  // Branches
-  for (let i = 0; i < 3; i++) {
-    const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.1, 1.5, 4), trunkMat);
-    branch.position.set(Math.sin(i * 2) * 0.5, 2.5 + i * 0.5, Math.cos(i * 2) * 0.5);
+  // Branches - more detailed
+  for (let i = 0; i < 5; i++) {
+    const branch = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.08, 1.5 + Math.random() * 0.5, 6),
+      trunkMat
+    );
+    const angle = (i / 5) * Math.PI * 2;
+    const height = 2.5 + i * 0.4;
+    branch.position.set(Math.sin(angle) * 0.5, height, Math.cos(angle) * 0.5);
     branch.rotation.z = (Math.random() - 0.5) * 1.2;
     branch.rotation.x = (Math.random() - 0.5) * 0.5;
     group.add(branch);
+    
+    // Sub-branches
+    if (Math.random() > 0.5) {
+      const subBranch = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.04, 0.8, 5),
+        trunkMat
+      );
+      subBranch.position.set(
+        branch.position.x + Math.sin(angle) * 0.3,
+        height + 0.3,
+        branch.position.z + Math.cos(angle) * 0.3
+      );
+      subBranch.rotation.z = (Math.random() - 0.5) * 1.5;
+      group.add(subBranch);
+    }
   }
+  
+  // Roots
+  for (let i = 0; i < 3; i++) {
+    const root = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.1, 1, 5),
+      trunkMat
+    );
+    const angle = (i / 3) * Math.PI * 2;
+    root.position.set(Math.sin(angle) * 0.4, 0.3, Math.cos(angle) * 0.4);
+    root.rotation.z = (Math.random() - 0.5) * 0.8;
+    group.add(root);
+  }
+  
+  return group;
+}
+
+function createRock(): THREE.Group {
+  const group = new THREE.Group();
+  const rockMat = new THREE.MeshLambertMaterial({ color: 0x666666, flatShading: true });
+  
+  // Main rock body - irregular shape
+  const size = 0.5 + Math.random() * 1.5;
+  const rockGeo = new THREE.DodecahedronGeometry(size, 0);
+  const rock = new THREE.Mesh(rockGeo, rockMat);
+  rock.position.y = size * 0.5;
+  rock.scale.set(1, 0.6, 1);
+  group.add(rock);
+  
+  // Smaller rocks around
+  for (let i = 0; i < 2; i++) {
+    const smallRock = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(size * 0.3, 0),
+      rockMat
+    );
+    const angle = Math.random() * Math.PI * 2;
+    smallRock.position.set(
+      Math.sin(angle) * size * 0.8,
+      size * 0.2,
+      Math.cos(angle) * size * 0.8
+    );
+    smallRock.scale.set(1, 0.5, 1);
+    group.add(smallRock);
+  }
+  
   return group;
 }
 
