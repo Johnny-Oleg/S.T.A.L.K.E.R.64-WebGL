@@ -223,7 +223,6 @@ export default function App() {
     // ============================================================
     const keys: Record<string, boolean> = {};
     let isLocked = false;
-    let mouseDownThisFrame = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
     let mouseInitialized = false;
@@ -248,7 +247,6 @@ export default function App() {
           canvas.requestPointerLock();
         }
         gd.isMouseDown = true;
-        mouseDownThisFrame = true;
       }
     };
     const onMouseUp = (e: MouseEvent) => {
@@ -405,6 +403,53 @@ export default function App() {
       setTimeout(() => scene.remove(spark), 100);
     }
 
+    function addToInventory(type: ItemType, name: string, count: number) {
+      // Try to stack with existing items of same type
+      for (const inv of gd.inventory) {
+        if (inv.type === type) {
+          // Find current count for this stack (stored in name as "name (count)")
+          const match = inv.name.match(/\((\d+)\)$/);
+          const currentCount = match ? parseInt(match[1]) : 1;
+          const spaceLeft = 999 - currentCount;
+          if (spaceLeft > 0) {
+            const toAdd = Math.min(count, spaceLeft);
+            const newCount = currentCount + toAdd;
+            inv.name = `${name} (${newCount})`;
+            count -= toAdd;
+            if (count <= 0) return true;
+          }
+        }
+      }
+      
+      // Create new stack(s)
+      while (count > 0) {
+        const stackSize = Math.min(count, 999);
+        const gridItem: InventoryItem = { 
+          type, 
+          name: stackSize > 1 ? `${name} (${stackSize})` : name,
+          gridX: 0, 
+          gridY: 0 
+        };
+        let placed = false;
+        for (let y = 0; y < 4 && !placed; y++) {
+          for (let x = 0; x < 6 && !placed; x++) {
+            if (!gd.inventory.find(i => i.gridX === x && i.gridY === y)) {
+              gridItem.gridX = x;
+              gridItem.gridY = y;
+              placed = true;
+            }
+          }
+        }
+        if (placed) {
+          gd.inventory.push(gridItem);
+          count -= stackSize;
+        } else {
+          break; // Inventory full
+        }
+      }
+      return true;
+    }
+
     function tryPickup() {
       const playerGround = new THREE.Vector3(gd.playerPos.x, 0, gd.playerPos.z);
       for (const item of lootItems) {
@@ -416,24 +461,12 @@ export default function App() {
           audio.playPickup();
           addLog(`Picked up ${item.name}`);
 
-          if (item.type === 'ammo9') {
-            weapons[0].reserveAmmo += 16;
-          } else if (item.type === 'ammo545') {
-            weapons[1].reserveAmmo += 30;
-          } else {
-            const gridItem: InventoryItem = { type: item.type, name: item.name, gridX: 0, gridY: 0 };
-            let placed = false;
-            for (let y = 0; y < 4 && !placed; y++) {
-              for (let x = 0; x < 6 && !placed; x++) {
-                if (!gd.inventory.find(i => i.gridX === x && i.gridY === y)) {
-                  gridItem.gridX = x;
-                  gridItem.gridY = y;
-                  placed = true;
-                }
-              }
-            }
-            if (placed) gd.inventory.push(gridItem);
-          }
+          // All items go to inventory with stacking
+          let count = 1;
+          if (item.type === 'ammo9') count = 16;
+          else if (item.type === 'ammo545') count = 30;
+          
+          addToInventory(item.type, item.name, count);
           break;
         }
       }
@@ -458,10 +491,16 @@ export default function App() {
     let lastTime = performance.now();
     let animFrameId: number;
     let hudUpdateTimer = 0;
-    let semiAutoFired = false;
+    let wasMouseDown = false;
     let gpCrouchLast = false;
     let gpReloadLast = false;
     let gpWepLast = false;
+    let gpActionLast = false;
+    let gpHealLast = false;
+    let gpWeaponLast = false;
+    let gpInventoryLast = false;
+    let invCursorX = 0;
+    let invCursorY = 0;
 
     function gameLoop() {
       animFrameId = requestAnimationFrame(gameLoop);
@@ -484,33 +523,122 @@ export default function App() {
       }
 
       // ---- GAMEPAD ----
+      // Standard mapping: 0=X/A, 1=Circle/B, 2=Square/X, 3=Triangle/Y
+      // 4=L1, 5=R1, 6=L2, 7=R2, 8=Select/Touchpad, 9=Start
       const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
       let gpMoveX = 0, gpMoveY = 0, gpLookX = 0, gpLookY = 0;
       let gpFire = false, gpSprint = false;
+      
       for (const gp of gamepads) {
         if (!gp) continue;
+        
+        // Left stick = movement
         if (Math.abs(gp.axes[0]) > 0.15) gpMoveX = gp.axes[0];
         if (Math.abs(gp.axes[1]) > 0.15) gpMoveY = gp.axes[1];
+        
+        // Right stick = look/aim (or inventory cursor)
         if (Math.abs(gp.axes[2]) > 0.15) gpLookX = gp.axes[2];
         if (Math.abs(gp.axes[3]) > 0.15) gpLookY = gp.axes[3];
+        
+        // R2 (button 7) = Shoot
         if (gp.buttons[7] && gp.buttons[7].value > 0.5) gpFire = true;
+        
+        // L2 (button 6) = Sprint/Run
         if (gp.buttons[6] && gp.buttons[6].value > 0.5) gpSprint = true;
+        
+        // X button (0) = Action/Use (like E key)
         if (gp.buttons[0] && gp.buttons[0].pressed) {
+          if (!gpActionLast) {
+            if (showInventoryRef.current) {
+              // Use selected item in inventory
+              const cursor = (window as any).__getInvCursor();
+              const gd2 = (window as any).__gameData;
+              const item = gd2.inventory.find((i: InventoryItem) => i.gridX === cursor.x && i.gridY === cursor.y);
+              if (item && (window as any).__useItem) {
+                (window as any).__useItem(item);
+              }
+            } else {
+              tryPickup();
+            }
+          }
+          gpActionLast = true;
+        } else {
+          gpActionLast = false;
+        }
+        
+        // Circle button (1) = Crouch toggle
+        if (gp.buttons[1] && gp.buttons[1].pressed) {
           if (!gpCrouchLast) { gd.isCrouching = !gd.isCrouching; }
           gpCrouchLast = true;
-        } else { gpCrouchLast = false; }
-        if (gp.buttons[1] && gp.buttons[1].pressed && !gpReloadLast) { startReload(); gpReloadLast = true; }
-        if (!(gp.buttons[1] && gp.buttons[1].pressed)) gpReloadLast = false;
-        if (gp.buttons[2] && gp.buttons[2].pressed && !gpWepLast) { gd.currentWeaponIdx = 0; gpWepLast = true; }
-        if (gp.buttons[3] && gp.buttons[3].pressed && !gpWepLast) { gd.currentWeaponIdx = 1; gpWepLast = true; }
-        if (!(gp.buttons[2]?.pressed || gp.buttons[3]?.pressed)) gpWepLast = false;
-        break;
+        } else {
+          gpCrouchLast = false;
+        }
+        
+        // Square button (2) = Reload
+        if (gp.buttons[2] && gp.buttons[2].pressed) {
+          if (!gpReloadLast) { startReload(); }
+          gpReloadLast = true;
+        } else {
+          gpReloadLast = false;
+        }
+        
+        // Triangle button (3) or Touchpad (8/9) = Inventory toggle
+        const trianglePressed = gp.buttons[3] && gp.buttons[3].pressed;
+        const touchpadPressed = (gp.buttons[8] && gp.buttons[8].pressed) || (gp.buttons[9] && gp.buttons[9].pressed);
+        if (trianglePressed || touchpadPressed) {
+          if (!gpInventoryLast) { toggleInventory(); }
+          gpInventoryLast = true;
+        } else {
+          gpInventoryLast = false;
+        }
+        
+        // L1 (button 4) = Cycle weapons
+        if (gp.buttons[4] && gp.buttons[4].pressed) {
+          if (!gpWeaponLast) {
+            gd.currentWeaponIdx = (gd.currentWeaponIdx + 1) % weapons.length;
+          }
+          gpWeaponLast = true;
+        } else {
+          gpWeaponLast = false;
+        }
+        
+        // R1 (button 5) = Quick heal (use medkit)
+        if (gp.buttons[5] && gp.buttons[5].pressed) {
+          if (!gpHealLast) {
+            const medkit = gd.inventory.find(i => i.type === 'medkit');
+            if (medkit && (window as any).__useItem) {
+              (window as any).__useItem(medkit);
+              addLog('Quick heal used');
+            }
+          }
+          gpHealLast = true;
+        } else {
+          gpHealLast = false;
+        }
+        
+        break; // Use first gamepad only
       }
 
+      // Apply right stick for looking (not in inventory) or cursor movement (in inventory)
       if (gpLookX !== 0 || gpLookY !== 0) {
-        gd.yaw -= gpLookX * 2.5 * dt;
-        gd.pitch -= gpLookY * 2.0 * dt;
-        gd.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, gd.pitch));
+        if (showInventoryRef.current) {
+          // Move inventory cursor
+          const cursor = (window as any).__getInvCursor();
+          const speed = 5 * dt;
+          if (gpLookX !== 0) {
+            const newX = cursor.x + Math.sign(gpLookX) * speed;
+            (window as any).__setInvCursor(Math.round(newX), cursor.y);
+          }
+          if (gpLookY !== 0) {
+            const newY = cursor.y + Math.sign(gpLookY) * speed;
+            (window as any).__setInvCursor(cursor.x, Math.round(newY));
+          }
+        } else {
+          // Normal look/aim
+          gd.yaw -= gpLookX * 2.5 * dt;
+          gd.pitch -= gpLookY * 2.0 * dt;
+          gd.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, gd.pitch));
+        }
       }
 
       // ---- MOVEMENT WITH COLLISION ----
@@ -560,22 +688,23 @@ export default function App() {
       const w = weapons[gd.currentWeaponIdx];
       const firing = (gd.isMouseDown && isLocked) || gpFire;
       
+      // Detect mouse just pressed (transition from not-pressed to pressed)
+      const mouseJustPressed = gd.isMouseDown && !wasMouseDown;
+      
       if (firing) {
         if (w.auto) {
+          // Full-auto: fire continuously while held
           fireWeapon();
         } else {
-          // Semi-auto: only fire on mouse down, not while held
-          if (mouseDownThisFrame && !semiAutoFired) {
+          // Semi-auto: fire only on the frame mouse is first pressed
+          if (mouseJustPressed) {
             fireWeapon();
-            semiAutoFired = true;
           }
         }
-      } else {
-        semiAutoFired = false;
       }
       
-      // Reset frame flags
-      mouseDownThisFrame = false;
+      // Update wasMouseDown for next frame
+      wasMouseDown = gd.isMouseDown;
 
       if (w.isReloading) {
         const elapsed = performance.now() / 1000 - w.reloadStartTime;
@@ -696,6 +825,15 @@ export default function App() {
       }
     }
 
+    // Expose functions for gamepad inventory control
+    (window as any).__gameData = gd;
+    (window as any).__useItem = useItem;
+    (window as any).__getInvCursor = () => ({ x: invCursorX, y: invCursorY });
+    (window as any).__setInvCursor = (x: number, y: number) => {
+      invCursorX = Math.max(0, Math.min(5, x));
+      invCursorY = Math.max(0, Math.min(3, y));
+    };
+
     gameLoop();
 
     return () => {
@@ -727,6 +865,23 @@ export default function App() {
         gd.inventory.splice(idx, 1);
         gd.audio?.playPickup();
         break;
+      case 'ammo9': {
+        // Parse count from name
+        const match = item.name.match(/\((\d+)\)$/);
+        const count = match ? parseInt(match[1]) : 1;
+        gd.weapons[0].reserveAmmo += count;
+        gd.inventory.splice(idx, 1);
+        gd.audio?.playPickup();
+        break;
+      }
+      case 'ammo545': {
+        const match = item.name.match(/\((\d+)\)$/);
+        const count = match ? parseInt(match[1]) : 1;
+        gd.weapons[1].reserveAmmo += count;
+        gd.inventory.splice(idx, 1);
+        gd.audio?.playPickup();
+        break;
+      }
       case 'armor': {
         const old = gd.armorSlot;
         gd.armorSlot = item;
@@ -765,10 +920,14 @@ export default function App() {
         <div className="text-gray-500 text-xs text-center space-y-1 mb-8 border border-gray-800 p-4 bg-gray-900/50">
           <p className="text-green-500 mb-2">▸ CONTROLS ◂</p>
           <p>WASD - Move | Mouse - Look | Shift - Sprint</p>
-          <p>C - Toggle Crouch | 1/2 - Switch Weapons</p>
+          <p>C - Crouch | 1/2 - Switch Weapons</p>
           <p>LMB - Fire | R - Reload | E - Pick Up</p>
           <p>I / Tab - Inventory PDA</p>
-          <p className="text-gray-600 mt-2">Click the game to capture mouse</p>
+          <p className="text-green-500 mt-3 mb-1">▸ GAMEPAD ◂</p>
+          <p>L-Stick: Move | R-Stick: Aim</p>
+          <p>R2: Shoot | L2: Sprint</p>
+          <p>✕: Use/Pickup | ○: Crouch | □: Reload</p>
+          <p>△: Inventory | L1: Switch Weapon | R1: Quick Heal</p>
         </div>
         <button
           onClick={startGame}
@@ -777,7 +936,6 @@ export default function App() {
         >
           ▶ ENTER THE ZONE
         </button>
-        <p className="text-gray-700 text-xs mt-6">N64-style procedural FPS • No external assets</p>
       </div>
     );
   }
@@ -924,7 +1082,7 @@ export default function App() {
                     return (
                       <div
                         key={idx}
-                        className={`w-11 h-11 border flex items-center justify-center cursor-pointer text-sm transition-colors
+                        className={`w-11 h-11 border flex flex-col items-center justify-center cursor-pointer text-sm transition-colors relative
                           ${item
                             ? 'border-green-700 bg-green-950/60 hover:bg-green-900/60 hover:border-green-500'
                             : 'border-gray-800 bg-gray-900/20'
@@ -933,26 +1091,34 @@ export default function App() {
                         title={item ? `Use: ${item.name}` : ''}
                       >
                         {item && (
-                          <span className={`text-lg ${
-                            item.type === 'medkit' ? 'text-red-400' :
-                            item.type === 'antirad' ? 'text-green-400' :
-                            item.type === 'ammo9' ? 'text-yellow-400' :
-                            item.type === 'ammo545' ? 'text-yellow-300' :
-                            item.type === 'artifact' ? 'text-purple-300' :
-                            'text-gray-300'
-                          }`}>
-                            {item.type === 'medkit' ? '✚' :
-                             item.type === 'antirad' ? '☢' :
-                             item.type === 'ammo9' ? '9' :
-                             item.type === 'ammo545' ? '5' :
-                             item.type === 'artifact' ? '◆' : '▣'}
-                          </span>
+                          <>
+                            <span className={`text-lg ${
+                              item.type === 'medkit' ? 'text-red-400' :
+                              item.type === 'antirad' ? 'text-green-400' :
+                              item.type === 'ammo9' ? 'text-yellow-400' :
+                              item.type === 'ammo545' ? 'text-yellow-300' :
+                              item.type === 'artifact' ? 'text-purple-300' :
+                              'text-gray-300'
+                            }`}>
+                              {item.type === 'medkit' ? '✚' :
+                               item.type === 'antirad' ? '☢' :
+                               item.type === 'ammo9' ? '9' :
+                               item.type === 'ammo545' ? '5' :
+                               item.type === 'artifact' ? '◆' : '▣'}
+                            </span>
+                            {/* Show count for stacked items */}
+                            {item.name.match(/\((\d+)\)$/) && (
+                              <span className="text-[8px] text-white absolute bottom-0 right-0.5">
+                                {item.name.match(/\((\d+)\)$/)?.[1]}
+                              </span>
+                            )}
+                          </>
                         )}
                       </div>
                     );
                   })}
                 </div>
-                <p className="text-gray-600 text-[10px] mt-2">Click items to use/equip them</p>
+                <p className="text-gray-600 text-[10px] mt-2">Click or [X] to use/equip</p>
               </div>
             </div>
 
