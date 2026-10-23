@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 // ============================================================
-// AUDIO SYSTEM - Web Audio API synthesized sounds
+// AUDIO SYSTEM
 // ============================================================
 export class AudioSystem {
   private ctx: AudioContext | null = null;
@@ -126,7 +126,7 @@ export class AudioSystem {
 }
 
 // ============================================================
-// TEXTURE GENERATOR - Procedural N64-style textures
+// TEXTURE GENERATOR
 // ============================================================
 export class TextureGen {
   static create(size: number, fn: (x: number, y: number) => [number, number, number]): THREE.CanvasTexture {
@@ -235,7 +235,6 @@ export function getTerrainHeight(x: number, z: number): number {
   h += Math.sin(x * 0.02) * Math.cos(z * 0.015) * 4;
   h += Math.sin(x * 0.05 + 1.3) * Math.cos(z * 0.04 + 0.7) * 2;
   h += Math.sin(x * 0.1 + 3.1) * Math.cos(z * 0.08 + 2.1) * 0.8;
-  // Flatten road area
   const roadX = Math.sin(z * 0.02) * 15;
   const distToRoad = Math.abs(x - roadX);
   if (distToRoad < 5) {
@@ -295,7 +294,7 @@ export function createTerrain(scene: THREE.Scene): THREE.Mesh {
 }
 
 // ============================================================
-// COLLISION SYSTEM
+// COLLISION SYSTEM - Wall segments for proper doorway entry
 // ============================================================
 export interface CollisionBox {
   min: THREE.Vector3;
@@ -306,20 +305,21 @@ export function checkCollision(pos: THREE.Vector3, radius: number, boxes: Collis
   const newPos = pos.clone();
   
   for (const box of boxes) {
-    // Check if player sphere intersects with AABB
     const closestPoint = new THREE.Vector3(
       Math.max(box.min.x, Math.min(newPos.x, box.max.x)),
-      Math.max(box.min.y, Math.min(newPos.y, box.max.y)),
+      newPos.y, // Only check XZ collision
       Math.max(box.min.z, Math.min(newPos.z, box.max.z))
     );
     
-    const distance = newPos.distanceTo(closestPoint);
+    const dx = newPos.x - closestPoint.x;
+    const dz = newPos.z - closestPoint.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
     
-    if (distance < radius) {
-      // Push player out of collision
-      const pushDir = newPos.clone().sub(closestPoint).normalize();
+    if (distance < radius && distance > 0.001) {
+      const pushDir = new THREE.Vector3(dx, 0, dz).normalize();
       const pushDistance = radius - distance;
-      newPos.add(pushDir.multiplyScalar(pushDistance));
+      newPos.x += pushDir.x * pushDistance;
+      newPos.z += pushDir.z * pushDistance;
     }
   }
   
@@ -327,13 +327,12 @@ export function checkCollision(pos: THREE.Vector3, radius: number, boxes: Collis
 }
 
 // ============================================================
-// WORLD PROPS - Houses, Vehicles, Anomalies
+// WORLD PROPS
 // ============================================================
 export interface WorldProp {
   mesh: THREE.Group;
   position: THREE.Vector3;
   type: string;
-  collisionBox: CollisionBox;
 }
 
 export interface AnomalyZone {
@@ -347,7 +346,7 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
   const anomalies: AnomalyZone[] = [];
   const collisionBoxes: CollisionBox[] = [];
 
-  // Village Houses
+  // Village Houses - with proper wall collision (doorway open)
   const housePositions = [
     new THREE.Vector3(20, 0, -30),
     new THREE.Vector3(-25, 0, 10),
@@ -364,13 +363,42 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     
     const w = 6 + idx;
     const d = 5 + (idx % 2) * 2;
-    const collisionBox: CollisionBox = {
-      min: new THREE.Vector3(pos.x - w/2 - 0.5, pos.y, pos.z - d/2 - 0.5),
-      max: new THREE.Vector3(pos.x + w/2 + 0.5, pos.y + 4, pos.z + d/2 + 0.5)
-    };
-    collisionBoxes.push(collisionBox);
+    const wallThick = 0.5;
+    const doorWidth = 1.4;
+    const h = 3.5;
     
-    props.push({ mesh: house, position: pos.clone(), type: 'house', collisionBox });
+    // Back wall - full solid
+    collisionBoxes.push({
+      min: new THREE.Vector3(pos.x - w/2, pos.y, pos.z - d/2 - wallThick/2),
+      max: new THREE.Vector3(pos.x + w/2, pos.y + h, pos.z - d/2 + wallThick/2)
+    });
+    
+    // Left wall - full solid
+    collisionBoxes.push({
+      min: new THREE.Vector3(pos.x - w/2 - wallThick/2, pos.y, pos.z - d/2),
+      max: new THREE.Vector3(pos.x - w/2 + wallThick/2, pos.y + h, pos.z + d/2)
+    });
+    
+    // Right wall - full solid
+    collisionBoxes.push({
+      min: new THREE.Vector3(pos.x + w/2 - wallThick/2, pos.y, pos.z - d/2),
+      max: new THREE.Vector3(pos.x + w/2 + wallThick/2, pos.y + h, pos.z + d/2)
+    });
+    
+    // Front wall - TWO pieces with door gap in middle
+    const frontLeftWidth = (w - doorWidth) / 2;
+    // Left piece of front wall
+    collisionBoxes.push({
+      min: new THREE.Vector3(pos.x - w/2, pos.y, pos.z + d/2 - wallThick/2),
+      max: new THREE.Vector3(pos.x - w/2 + frontLeftWidth, pos.y + h, pos.z + d/2 + wallThick/2)
+    });
+    // Right piece of front wall
+    collisionBoxes.push({
+      min: new THREE.Vector3(pos.x + w/2 - frontLeftWidth, pos.y, pos.z + d/2 - wallThick/2),
+      max: new THREE.Vector3(pos.x + w/2, pos.y + h, pos.z + d/2 + wallThick/2)
+    });
+    
+    props.push({ mesh: house, position: pos.clone(), type: 'house' });
   });
 
   // Vehicles
@@ -397,7 +425,7 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     };
     collisionBoxes.push(collisionBox);
     
-    props.push({ mesh: vehicle, position: v.pos.clone(), type: v.type, collisionBox });
+    props.push({ mesh: vehicle, position: v.pos.clone(), type: v.type });
   });
 
   // Anomaly Zones
@@ -415,7 +443,7 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     anomalies.push({ position: pos.clone(), radius: 8, particles: anomaly.particles });
   });
 
-  // Trees (dead/bare)
+  // Trees
   for (let i = 0; i < 40; i++) {
     const x = (Math.random() - 0.5) * 250;
     const z = (Math.random() - 0.5) * 250;
@@ -425,7 +453,6 @@ export function createWorldProps(scene: THREE.Scene): { props: WorldProp[], anom
     tree.position.set(x, getTerrainHeight(x, z), z);
     scene.add(tree);
     
-    // Tree collision (thin cylinder)
     collisionBoxes.push({
       min: new THREE.Vector3(x - 0.3, getTerrainHeight(x, z), z - 0.3),
       max: new THREE.Vector3(x + 0.3, getTerrainHeight(x, z) + 4, z + 0.3)
@@ -462,7 +489,6 @@ function createHouse(variant: number): THREE.Group {
   const wallTex = variant % 2 === 0 ? TextureGen.brick() : TextureGen.wood();
   const wallMat = new THREE.MeshLambertMaterial({ map: wallTex, flatShading: true });
 
-  // Walls (hollow - 4 walls with doorway)
   const wallThickness = 0.3;
   // Back wall
   const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, wallThickness), wallMat);
@@ -477,23 +503,25 @@ function createHouse(variant: number): THREE.Group {
   right.position.set(w / 2, h / 2, 0);
   group.add(right);
   // Front wall (with door gap)
-  const frontLeft = new THREE.Mesh(new THREE.BoxGeometry(w / 2 - 0.7, h, wallThickness), wallMat);
-  frontLeft.position.set(-w / 4 - 0.35, h / 2, d / 2);
+  const doorWidth = 1.4;
+  const frontSideWidth = (w - doorWidth) / 2;
+  const frontLeft = new THREE.Mesh(new THREE.BoxGeometry(frontSideWidth, h, wallThickness), wallMat);
+  frontLeft.position.set(-w / 2 + frontSideWidth / 2, h / 2, d / 2);
   group.add(frontLeft);
-  const frontRight = new THREE.Mesh(new THREE.BoxGeometry(w / 2 - 0.7, h, wallThickness), wallMat);
-  frontRight.position.set(w / 4 + 0.35, h / 2, d / 2);
+  const frontRight = new THREE.Mesh(new THREE.BoxGeometry(frontSideWidth, h, wallThickness), wallMat);
+  frontRight.position.set(w / 2 - frontSideWidth / 2, h / 2, d / 2);
   group.add(frontRight);
-  const frontTop = new THREE.Mesh(new THREE.BoxGeometry(1.4, h - 2.2, wallThickness), wallMat);
+  const frontTop = new THREE.Mesh(new THREE.BoxGeometry(doorWidth, h - 2.2, wallThickness), wallMat);
   frontTop.position.set(0, h - (h - 2.2) / 2, d / 2);
   group.add(frontTop);
 
   // Floor
   const floorMat = new THREE.MeshLambertMaterial({ map: TextureGen.concrete(), flatShading: true });
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(w, 0.2, d), floorMat);
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(w - 0.5, 0.2, d - 0.5), floorMat);
   floor.position.set(0, 0.1, 0);
   group.add(floor);
 
-  // Roof - more detailed
+  // Roof
   const roofMat = new THREE.MeshLambertMaterial({ map: TextureGen.rust(), flatShading: true });
   const roofGeo = new THREE.BoxGeometry(w + 1, 0.2, d + 1);
   const roof = new THREE.Mesh(roofGeo, roofMat);
@@ -501,7 +529,6 @@ function createHouse(variant: number): THREE.Group {
   roof.rotation.z = 0.15;
   group.add(roof);
   
-  // Roof ridge
   const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, d + 1), roofMat);
   ridge.position.set(0, h + 0.8, 0);
   group.add(ridge);
@@ -525,47 +552,26 @@ function createUAZ(): THREE.Group {
   const rustMat = new THREE.MeshLambertMaterial({ map: TextureGen.rust(), flatShading: true });
   const glassMat = new THREE.MeshLambertMaterial({ color: 0x88aacc, transparent: true, opacity: 0.5, flatShading: true });
 
-  // Body - more detailed with multiple parts
   const bodyMain = new THREE.Mesh(new THREE.BoxGeometry(2, 1, 4), bodyMat);
   bodyMain.position.y = 1;
   group.add(bodyMain);
 
-  // Hood
   const hood = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.3, 1.5), bodyMat);
   hood.position.set(0, 1.3, -1.2);
   group.add(hood);
 
-  // Cabin
   const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.8, 2), bodyMat);
   cabin.position.set(0, 1.8, -0.5);
   group.add(cabin);
 
-  // Windshield
   const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 0.05), glassMat);
   windshield.position.set(0, 1.9, 0.5);
   group.add(windshield);
 
-  // Rear section
   const rear = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.6, 1), bodyMat);
   rear.position.set(0, 1.6, 1.5);
   group.add(rear);
 
-  // Fenders
-  const fenderGeo = new THREE.BoxGeometry(0.3, 0.4, 1);
-  const fenderFL = new THREE.Mesh(fenderGeo, bodyMat);
-  fenderFL.position.set(-0.9, 0.8, 1.2);
-  group.add(fenderFL);
-  const fenderFR = new THREE.Mesh(fenderGeo, bodyMat);
-  fenderFR.position.set(0.9, 0.8, 1.2);
-  group.add(fenderFR);
-  const fenderBL = new THREE.Mesh(fenderGeo, bodyMat);
-  fenderBL.position.set(-0.9, 0.8, -1.2);
-  group.add(fenderBL);
-  const fenderBR = new THREE.Mesh(fenderGeo, bodyMat);
-  fenderBR.position.set(0.9, 0.8, -1.2);
-  group.add(fenderBR);
-
-  // Wheels - more detailed
   const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 12);
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222, flatShading: true });
   const hubGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.32, 8);
@@ -576,14 +582,12 @@ function createUAZ(): THREE.Group {
     wheel.position.set(x, y, z);
     wheel.rotation.z = Math.PI / 2;
     group.add(wheel);
-    
     const hub = new THREE.Mesh(hubGeo, hubMat);
     hub.position.set(x, y, z);
     hub.rotation.z = Math.PI / 2;
     group.add(hub);
   });
 
-  // Headlights
   const lightGeo = new THREE.SphereGeometry(0.15, 8, 8);
   const lightMat = new THREE.MeshLambertMaterial({ color: 0xffffcc, emissive: 0x444400 });
   const lightL = new THREE.Mesh(lightGeo, lightMat);
@@ -593,14 +597,9 @@ function createUAZ(): THREE.Group {
   lightR.position.set(0.6, 1.2, -2);
   group.add(lightR);
 
-  // Rust patches
   const rustPatch = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.1), rustMat);
   rustPatch.position.set(0.8, 1.2, 2.01);
   group.add(rustPatch);
-  
-  const rustPatch2 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 0.1), rustMat);
-  rustPatch2.position.set(-0.7, 1.0, 1.5);
-  group.add(rustPatch2);
 
   return group;
 }
@@ -611,43 +610,30 @@ function createZIL(): THREE.Group {
   const woodMat = new THREE.MeshLambertMaterial({ map: TextureGen.wood(), flatShading: true });
   const glassMat = new THREE.MeshLambertMaterial({ color: 0x88aacc, transparent: true, opacity: 0.5, flatShading: true });
 
-  // Cab - more detailed
   const cabMain = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.5, 2), cabMat);
   cabMain.position.set(0, 1.5, -2);
   group.add(cabMain);
 
-  // Cab roof
   const cabRoof = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.3, 1.8), cabMat);
   cabRoof.position.set(0, 2.4, -2);
   group.add(cabRoof);
 
-  // Windshield
   const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 0.05), glassMat);
   windshield.position.set(0, 1.8, -1);
   group.add(windshield);
 
-  // Hood
   const hood = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.8, 1), cabMat);
   hood.position.set(0, 1.2, -3);
   group.add(hood);
 
-  // Grille
-  const grilleMat = new THREE.MeshLambertMaterial({ color: 0x444444, flatShading: true });
-  const grille = new THREE.Mesh(new THREE.BoxGeometry(2, 0.6, 0.1), grilleMat);
-  grille.position.set(0, 1.2, -3.5);
-  group.add(grille);
-
-  // Cargo bed
   const bed = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.3, 4), woodMat);
   bed.position.set(0, 0.8, 1.5);
   group.add(bed);
 
-  // Cargo sides - more detailed with planks
   for (let i = 0; i < 4; i++) {
     const plank = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.9), woodMat);
     plank.position.set(-1.2, 1.2, -0.5 + i * 1);
     group.add(plank);
-    
     const plankR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.9), woodMat);
     plankR.position.set(1.2, 1.2, -0.5 + i * 1);
     group.add(plankR);
@@ -657,33 +643,15 @@ function createZIL(): THREE.Group {
   sideB.position.set(0, 1.3, 3.5);
   group.add(sideB);
 
-  // Wheels - more detailed
   const wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.35, 12);
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222, flatShading: true });
-  const hubGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.37, 8);
-  const hubMat = new THREE.MeshLambertMaterial({ color: 0x666666, flatShading: true });
   
   [[-1.1, 0.5, -2], [1.1, 0.5, -2], [-1.1, 0.5, 1], [1.1, 0.5, 1], [-1.1, 0.5, 2.5], [1.1, 0.5, 2.5]].forEach(([x, y, z]) => {
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.position.set(x, y, z);
     wheel.rotation.z = Math.PI / 2;
     group.add(wheel);
-    
-    const hub = new THREE.Mesh(hubGeo, hubMat);
-    hub.position.set(x, y, z);
-    hub.rotation.z = Math.PI / 2;
-    group.add(hub);
   });
-
-  // Headlights
-  const lightGeo = new THREE.SphereGeometry(0.2, 8, 8);
-  const lightMat = new THREE.MeshLambertMaterial({ color: 0xffffcc, emissive: 0x444400 });
-  const lightL = new THREE.Mesh(lightGeo, lightMat);
-  lightL.position.set(-0.8, 1.2, -3.5);
-  group.add(lightL);
-  const lightR = new THREE.Mesh(lightGeo, lightMat);
-  lightR.position.set(0.8, 1.2, -3.5);
-  group.add(lightR);
 
   return group;
 }
@@ -692,12 +660,10 @@ function createDeadTree(): THREE.Group {
   const group = new THREE.Group();
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x3a2a1a, flatShading: true });
   
-  // Trunk with more segments
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.3, 4, 8), trunkMat);
   trunk.position.y = 2;
   group.add(trunk);
 
-  // Branches - more detailed
   for (let i = 0; i < 5; i++) {
     const branch = new THREE.Mesh(
       new THREE.CylinderGeometry(0.03, 0.08, 1.5 + Math.random() * 0.5, 6),
@@ -709,33 +675,6 @@ function createDeadTree(): THREE.Group {
     branch.rotation.z = (Math.random() - 0.5) * 1.2;
     branch.rotation.x = (Math.random() - 0.5) * 0.5;
     group.add(branch);
-    
-    // Sub-branches
-    if (Math.random() > 0.5) {
-      const subBranch = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.02, 0.04, 0.8, 5),
-        trunkMat
-      );
-      subBranch.position.set(
-        branch.position.x + Math.sin(angle) * 0.3,
-        height + 0.3,
-        branch.position.z + Math.cos(angle) * 0.3
-      );
-      subBranch.rotation.z = (Math.random() - 0.5) * 1.5;
-      group.add(subBranch);
-    }
-  }
-  
-  // Roots
-  for (let i = 0; i < 3; i++) {
-    const root = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.05, 0.1, 1, 5),
-      trunkMat
-    );
-    const angle = (i / 3) * Math.PI * 2;
-    root.position.set(Math.sin(angle) * 0.4, 0.3, Math.cos(angle) * 0.4);
-    root.rotation.z = (Math.random() - 0.5) * 0.8;
-    group.add(root);
   }
   
   return group;
@@ -745,29 +684,12 @@ function createRock(): THREE.Group {
   const group = new THREE.Group();
   const rockMat = new THREE.MeshLambertMaterial({ color: 0x666666, flatShading: true });
   
-  // Main rock body - irregular shape
   const size = 0.5 + Math.random() * 1.5;
   const rockGeo = new THREE.DodecahedronGeometry(size, 0);
   const rock = new THREE.Mesh(rockGeo, rockMat);
   rock.position.y = size * 0.5;
   rock.scale.set(1, 0.6, 1);
   group.add(rock);
-  
-  // Smaller rocks around
-  for (let i = 0; i < 2; i++) {
-    const smallRock = new THREE.Mesh(
-      new THREE.DodecahedronGeometry(size * 0.3, 0),
-      rockMat
-    );
-    const angle = Math.random() * Math.PI * 2;
-    smallRock.position.set(
-      Math.sin(angle) * size * 0.8,
-      size * 0.2,
-      Math.cos(angle) * size * 0.8
-    );
-    smallRock.scale.set(1, 0.5, 1);
-    group.add(smallRock);
-  }
   
   return group;
 }

@@ -219,12 +219,14 @@ export default function App() {
     gd.lootItems = lootItems;
 
     // ============================================================
-    // INPUT - FIXED MOUSE HANDLING
+    // INPUT - ROBUST MOUSE + KEYBOARD + GAMEPAD
     // ============================================================
     const keys: Record<string, boolean> = {};
     let isLocked = false;
     let mouseDownThisFrame = false;
-    let mouseUpThisFrame = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let mouseInitialized = false;
 
     const onKeyDown = (e: KeyboardEvent) => {
       keys[e.code] = true;
@@ -238,9 +240,13 @@ export default function App() {
     };
     const onKeyUp = (e: KeyboardEvent) => { keys[e.code] = false; };
     
-    // FIXED: Proper mouse event handling
+    // Mouse down - works both with and without pointer lock
     const onMouseDown = (e: MouseEvent) => {
-      if (e.button === 0 && isLocked && !showInventoryRef.current) {
+      if (e.button === 0 && !showInventoryRef.current && !gd.isDead) {
+        // Request pointer lock on first click if not locked
+        if (!isLocked) {
+          canvas.requestPointerLock();
+        }
         gd.isMouseDown = true;
         mouseDownThisFrame = true;
       }
@@ -248,20 +254,51 @@ export default function App() {
     const onMouseUp = (e: MouseEvent) => {
       if (e.button === 0) {
         gd.isMouseDown = false;
-        mouseUpThisFrame = true;
       }
     };
+    
+    // Mouse move - dual system: pointer lock OR absolute tracking
     const onMouseMove = (e: MouseEvent) => {
-      if (!isLocked || showInventoryRef.current) return;
-      gd.yaw -= e.movementX * 0.002;
-      gd.pitch -= e.movementY * 0.002;
+      if (showInventoryRef.current || gd.isDead) return;
+      
+      // Initialize last position on first move
+      if (!mouseInitialized) {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        mouseInitialized = true;
+        return;
+      }
+      
+      let deltaX = 0;
+      let deltaY = 0;
+      
+      if (isLocked && e.movementX !== undefined) {
+        // Pointer lock mode - use movementX/Y
+        deltaX = e.movementX;
+        deltaY = e.movementY;
+      } else if (!isLocked) {
+        // Fallback: track absolute position changes
+        deltaX = e.clientX - lastMouseX;
+        deltaY = e.clientY - lastMouseY;
+      }
+      
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+      
+      // Apply mouse look
+      const sensitivity = 0.003;
+      gd.yaw -= deltaX * sensitivity;
+      gd.pitch -= deltaY * sensitivity;
       gd.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, gd.pitch));
     };
+    
     const onPointerLockChange = () => {
       isLocked = document.pointerLockElement === canvas;
+      // Reset mouse tracking when lock changes
+      mouseInitialized = false;
     };
 
-    // Use document for mouse events to ensure they work
+    // Attach events to document for reliable capture
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
     document.addEventListener('mousedown', onMouseDown);
@@ -269,12 +306,9 @@ export default function App() {
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('pointerlockchange', onPointerLockChange);
 
-    const onCanvasClick = () => {
-      if (!isLocked && !showInventoryRef.current && !gd.isDead) {
-        canvas.requestPointerLock();
-      }
-    };
-    canvas.addEventListener('click', onCanvasClick);
+    // Also prevent context menu
+    const onContextMenu = (e: Event) => e.preventDefault();
+    canvas.addEventListener('contextmenu', onContextMenu);
 
     // ============================================================
     // GAME FUNCTIONS
@@ -542,7 +576,6 @@ export default function App() {
       
       // Reset frame flags
       mouseDownThisFrame = false;
-      mouseUpThisFrame = false;
 
       if (w.isReloading) {
         const elapsed = performance.now() / 1000 - w.reloadStartTime;
@@ -673,7 +706,7 @@ export default function App() {
       document.removeEventListener('mouseup', onMouseUp);
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
-      canvas.removeEventListener('click', onCanvasClick);
+      canvas.removeEventListener('contextmenu', onContextMenu);
       renderer.dispose();
     };
   }, [started]);
